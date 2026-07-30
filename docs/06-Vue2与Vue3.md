@@ -4,7 +4,7 @@
 
 本章计划覆盖：
 - [x] 响应式原理：`Object.defineProperty` vs `Proxy`（为什么升级）
-- [ ] Composition API vs Options API（`<script setup>` 心智模型）
+- [x] Composition API vs Options API（`<script setup>` 心智模型）
 - [ ] 组件通信：props/emit、provide/inject、attrs/slots
 - [ ] Vue Router 4：路由模式、导航守卫顺序、动态路由、权限
 - [ ] Pinia vs Vuex（Setup Store 写法）
@@ -88,3 +88,79 @@ const reactive = (obj) => new Proxy(obj, {
 - Vue3 的 `reactive` 为什么要"访问到才代理"？有什么性能上的考量？
 - 如果对象被 Proxy 包了好几层，`has` / `deleteProperty` 这些陷阱怎么处理？
 - Vue2 当年能不能也用 Proxy？为什么没选？（Proxy 不支持 IE11 以下，是当时的兼容性代价）
+
+---
+
+## Composition API vs Options API（⭐️⭐️⭐️）
+
+**一句话结论：** Options API 把代码按"类型"（data / methods / computed / 生命周期）分组，组件一大就散；Composition API 让你按"功能"把相关逻辑写在一起，配合 `<script setup>` 语法糖几乎不写样板，逻辑复用也更干净。
+
+### 🍳 生活类比
+
+Options API 像按"家具种类"收纳的房间：所有沙发放客厅、所有碗放厨房、所有书放书房。你想招待一次客人，得从客厅拿椅子、去厨房拿杯子、去书房翻招待手册——同一件事的东西散在三个房间。
+
+Composition API 像按"生活场景"收纳：把"待客"要用的椅子、杯子、手册全塞进一个标注清楚的收纳箱，要用时一箱拎走。代码同理——"用户登录"这块逻辑（状态、校验、请求、监听）不再被拆到 data / methods / watch 四处，而是聚在一个 `useLogin()` 里。
+
+### 🔍 原理下沉
+
+Options API 是 Vue2 时代的主写法：组件是一个配置对象，data / methods / computed / watch / 生命周期各占一块。同一业务逻辑（比如"搜索框防抖 + 结果展示"）会被拆到 methods、data、watch 里，组件超过两屏就找不到北。逻辑复用靠 mixins，但 mixins 有两大坑：属性来源不透明（"这个 `loading` 到底哪个 mixin 提供的？"），同名属性 / 方法还会悄悄覆盖。
+
+Composition API 是 Vue3 引入的：用 `setup()` 函数把"同一块逻辑"写在一起，最后 return 给模板。后来出了 `<script setup>` 语法糖——直接在 `<script setup>` 里写顶层 `const` / `function`，编译时自动暴露给模板，连 `setup()` 和 `return` 都省了。
+
+为什么值得升级：
+- **逻辑复用更干净**：抽成 `useXxx()` 组合函数（类似 React Hooks），来源清晰、无命名冲突；
+- **更好的 TS 支持**：基于普通变量和函数，类型推导比 Options 的字符串 key 友好太多；
+- **利于 tree-shaking**：功能以函数形式 import，没用到的能摇掉；Options 的属性名是字符串 key，静态分析困难；
+- **没有 `this` 心智负担**：`<script setup>` 里直接写变量，不用纠结 `this` 指向。
+
+> 版本演进提醒：Vue3 完全兼容 Options API，老项目不强制改；但新项目官方推荐 `<script setup>`。两者也能混用（`setup()` 返回的属性会和 options 合并），只是一般没必要。
+
+📌 一个容易混的点：`ref` 在 JS 里要通过 `.value` 访问，在模板里不用；`reactive` 则直接 `.属性`。我一开始老在 JS 里写 `count++` 忘了 `.value`，页面不动还以为响应式坏了。
+
+### 🔁 对比学习（Options vs `<script setup>`）
+
+```js
+// Options API：按类型分组
+export default {
+  data() {
+    return { count: 0 }
+  },
+  computed: {
+    double() { return this.count * 2 }
+  },
+  methods: {
+    increment() { this.count++ }
+  },
+  mounted() {
+    console.log('mounted', this.count)
+  }
+}
+```
+
+```vue
+<!-- Composition API + <script setup>：按功能聚合 -->
+<script setup>
+import { ref, computed, onMounted } from 'vue'
+
+const count = ref(0)
+const double = computed(() => count.value * 2)
+const increment = () => { count.value++ }
+
+onMounted(() => console.log('mounted', count.value))
+</script>
+```
+
+核心差异一句话：**Options 是"按格子填空"，Composition 是"按想法自由搭"。**
+
+### 💥 我踩过的坑
+
+第一次写 `<script setup>` 时，习惯性地想在 `mounted` 里用 `this.$refs.xxx` 拿 DOM，结果直接报错。后来才反应过来：`<script setup>` 里没有 `this`，组件实例还没完全建好就去拿 ref 本就不对，正解是给元素加 `ref="xxx"` 然后用同名的 `const xxx = ref()` 接住。
+
+还有 mixins 那段黑历史：两个 mixin 各自带了 `refresh()`，调了半天不知道哪个生效，最后靠打印堆栈才定位。换成 `useXxx()` 组合函数后，谁提供什么一目了然，再没踩过。
+
+### 🎯 面试官可能追问
+
+- `<script setup>` 编译后其实还是 `setup()`，它具体帮你做了什么？（编译期收集顶层绑定暴露给模板、自动注册组件）
+- Composition API 里想访问路由 / store 怎么办？（用 `useRoute()` / `useStore()`，或 `getCurrentInstance()`，但后者不推荐）
+- 为什么说 Composition API 更利于 tree-shaking？（函数式 import 可被静态分析摇掉；Options 的属性是字符串 key 难以分析）
+- Options 和 Composition 能混着写吗？会有什么坑？（能，`setup()` 返回值会和 options 合并，但混用增加认知负担）
