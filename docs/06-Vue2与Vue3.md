@@ -164,3 +164,55 @@ onMounted(() => console.log('mounted', count.value))
 - Composition API 里想访问路由 / store 怎么办？（用 `useRoute()` / `useStore()`，或 `getCurrentInstance()`，但后者不推荐）
 - 为什么说 Composition API 更利于 tree-shaking？（函数式 import 可被静态分析摇掉；Options 的属性是字符串 key 难以分析）
 - Options 和 Composition 能混着写吗？会有什么坑？（能，`setup()` 返回值会和 options 合并，但混用增加认知负担）
+
+---
+
+### `ref` vs `reactive`：怎么选，我踩过的响应式丢失坑（⭐️⭐️⭐️）
+
+- **一句话结论**：基本类型或"单个值"用 `ref`（记得 `.value`）；一组有关联的对象状态用 `reactive`（直接 `.属性` 访问）。选错不会报错，但会悄悄不更新——这才是坑。
+
+### 🍳 生活类比
+
+`ref` 像贴了快递单的**单个包裹**：取件得先"掀盖"（`count.value`）才能拿到里面的东西。`reactive` 像**敞口的收纳盒**：直接伸手拿就行（`state.count`），但盒子整体不能换，一换就空了。
+
+### 🔍 原理下沉
+
+- `ref` 不管你传基本类型还是对象，对外都包一层带 `.value` 的容器；传对象时内部其实也是调 `reactive` 去代理的。所以 `ref` 是"万能但要多写 `.value`"。
+- `reactive` 基于 `Proxy`，**只认对象 / 数组 / Map / Set**。你塞个 `number` 进去它不报错，但压根没代理，改了也不响应——这种静默失败最坑。
+- `reactive` 的两个致命点：
+  1. **整体替换会断响应**：`state = { ...newObj }` 之后，新对象不是原来那个 Proxy 了，模板绑定的还是旧引用，页面不动。
+  2. **解构 / 展开会丢响应**：`const { list } = state` 拿到的 `list` 是普通值，之后改它不会触发更新。要解构得用 `toRefs(state)`。
+
+### 🔁 对比学习
+
+```js
+// ref：单个值或对象都行，但要 .value
+import { ref } from 'vue'
+const count = ref(0)
+count.value++          // 模板里不用写 .value，编译帮你解包
+const user = ref({ name: 'A' })
+user.value.name = 'B'  // 对象内部改，照常响应
+
+// reactive：只接对象，直接 .属性，但别整体换、别直接解构
+import { reactive, toRefs } from 'vue'
+const state = reactive({ count: 0, name: 'A' })
+state.count++          // 直接改，OK
+// ❌ state = { count: 1 }       ← 整体替换，响应断了
+// ❌ const { count } = state    ← 解构丢响应
+const { count, name } = toRefs(state)  // ✅ 用 toRefs 保住响应
+```
+
+决策口诀：**"单值用 ref，成团用 reactive；要替换整块状态就 ref 包对象，或用 `Object.assign(state, newObj)` 原地改。"**
+
+### 💥 我踩过的坑
+
+第一次用 `reactive` 接管表单，点"重置"时我直接 `formData = resetForm()`——页面纹丝不动。盯了一小时才发现是把整个引用换了，Proxy 那条线断了。后来要么改用 `Object.assign(formData, resetForm())` 原地更新，要么干脆用 `ref` 包表单对象。
+
+还有一回解构店铺列表：`const { list } = shopState`，在子组件里改 `list` 死活不刷新。才知道解构出来的是死值，得 `storeToRefs`（Pinia）或 `toRefs` 接住。
+
+### 🎯 面试官可能追问
+
+- `ref` 内部是不是也用 `reactive`？（是，对象类型会转成 reactive，基本类型用 `RefImpl` 包一层 `.value`）
+- 为什么 `reactive` 不能整体替换？（Proxy 代理的是原对象引用，重新赋值换了引用就脱离了代理）
+- `toRefs` 和 `toRef` 区别？（前者把整个对象每个属性转 ref，后者只转单个）
+- 模板里 `ref` 为什么不用写 `.value`？（编译期自动解包，但 `v-for` 里或作为对象属性时不一定解包，需注意）
