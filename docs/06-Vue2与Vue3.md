@@ -5,10 +5,10 @@
 本章计划覆盖：
 - [x] 响应式原理：`Object.defineProperty` vs `Proxy`（为什么升级）
 - [x] Composition API vs Options API（`<script setup>` 心智模型）
-- [ ] 组件通信：props/emit、provide/inject、attrs/slots
-- [ ] Vue Router 4：路由模式、导航守卫顺序、动态路由、权限
-- [ ] Pinia vs Vuex（Setup Store 写法）
-- [ ] 生命周期对照、v-model 实现、diff 思路
+- [x] 组件通信：props/emit、provide/inject、attrs/slots
+- [x] Vue Router 4：路由模式、导航守卫顺序、动态路由、权限
+- [x] Pinia vs Vuex（Setup Store 写法）
+- [x] 生命周期对照、v-model 实现、diff 思路
 
 响应式是 Vue 最绕不过去的一块，这章我特意写得细一些，把对比和踩坑都摊开讲。
 
@@ -216,3 +216,184 @@ const { count, name } = toRefs(state)  // ✅ 用 toRefs 保住响应
 - 为什么 `reactive` 不能整体替换？（Proxy 代理的是原对象引用，重新赋值换了引用就脱离了代理）
 - `toRefs` 和 `toRef` 区别？（前者把整个对象每个属性转 ref，后者只转单个）
 - 模板里 `ref` 为什么不用写 `.value`？（编译期自动解包，但 `v-for` 里或作为对象属性时不一定解包，需注意）
+
+---
+
+### 组件通信：props/emit、provide/inject、attrs/slots（⭐️⭐️）
+
+**一句话结论：** 父子用 props 下发、emit 回传；跨多层用 provide/inject；没被声明为 props 的属性自动走 attrs 透传；插槽 slots 负责"把父的内容塞进子的留白处"。Vue3 里 props 是单向的，子想改父数据得 emit 让父去改。
+
+### 🍳 生活类比
+
+props/emit 像父子间的"爸爸发零花钱（props）/ 儿子交成绩单（emit）"，钱怎么花得回报给爹。provide/inject 像爷爷在族谱立了条家规（provide），隔了三房的孙子不用层层传话，直接能读到（inject）。attrs 像"没拆的快递"——父传了但子没声明 props 的属性，默认挂到子根元素上。slots 像"留白的相框"，父把内容填进子组件留的位置。
+
+### 🔍 原理下沉
+
+- props 单向数据流，子组件不能直接改 props（会告警），要改得 `emit` 事件让父改。
+- Vue3 `<script setup>` 用 `defineProps(['msg'])` / `defineEmits(['change'])`，编译期宏，不用 import。
+- provide/inject 适合深层传递（主题、locale、当前用户）。它不是状态管理，传可变全局数据容易失控——provide 一般传"只读配置"或 `ref`/`reactive`（子孙 inject 后 `.value` 仍响应）。
+- attrs：未被 props 声明的属性 + 事件监听器，默认透传到组件根元素；`inheritAttrs: false` 时可手动 `v-bind="$attrs"` 指定挂到内部元素（典型：把 class/style 透传到内部 input）。
+- slots：`<slot />` 默认插槽、`<slot name="x">` 具名、`v-slot`（或 `#`）作用域插槽——子把数据回传给父的插槽内容用。
+
+### 🔁 对比学习（Vue2 vs Vue3）
+
+- Vue2 用 `this.$emit`、选项式 `props: []`；Vue3 `<script setup>` 用 `defineProps`/`defineEmits`。
+- `$listeners` 在 Vue3 合并进 `$attrs`（Vue2 里两者分开），少一层心智负担。
+- 作用域插槽 Vue2 用 `slot-scope`，Vue3 统一用 `v-slot`（或 `#`），写法更一致。
+
+```vue
+<!-- 子组件：emit + 作用域插槽 -->
+<script setup>
+const emit = defineEmits(['change'])
+const props = defineProps({ title: String })
+</script>
+<template>
+  <div>
+    <h3>{{ title }}</h3>
+    <slot name="footer" :count="props.title.length" />
+  </div>
+</template>
+
+<!-- 父组件使用 -->
+<Child title="hi" @change="onChange">
+  <template #footer="{ count }">字数：{{ count }}</template>
+</Child>
+```
+
+### 💥 我踩过的坑
+
+- 早期在子组件里直接 `this.someProp = newValue` 想改父传的值，页面不更新还告警。后来懂了 props 只读，得 `$emit('update')` 让父改。
+- provide/inject 我一度当"全局 state"用，深层组件改了 inject 的值，上游根本不知道，查半天才定位。之后约定 provide 只传只读配置，可变状态走 Pinia。
+- attrs 透传踩过：给封装的 `<BaseInput>` 传 class，结果挂到外层 div 而非内部 input，样式错位。加 `inheritAttrs: false` + `v-bind="$attrs"` 指定挂到 input 才修好。
+
+### 🎯 面试官可能追问
+
+- props 为什么是单向的？直接改会有什么问题？（父源数据被悄悄改，数据流不可追踪）
+- provide/inject 能传响应式数据吗？怎么做？（传 `ref`/`reactive`，子孙 inject 后照常响应）
+- 怎么阻止 attrs 自动继承到根元素？（`inheritAttrs: false` + 手动 `v-bind="$attrs"`）
+- 作用域插槽和 props 的区别？（插槽传"UI 片段"且子能把数据回传片段；props 传的是数据）
+
+---
+
+### Vue Router 4（⭐️⭐️）
+
+**一句话结论：** Router 4 把路由表写成数组、用 `createRouter` 创建；两种模式 history（URL 干净、需服务端兜底）和 hash（带 #、无需服务端配置）；导航守卫有固定执行顺序，权限拦截一般挂在全局前置守卫 `beforeEach`。
+
+### 🍳 生活类比
+
+Router 像小区门禁。URL 是你要去的楼栋号：history 模式是"直接报楼栋名"（好看，但保安得认识所有楼，否则迷路——服务端要配置 fallback）；hash 模式是"楼栋名前加个 # 闸机号"（丑点但闸机自己认，不用麻烦保安）。
+
+### 🔍 原理下沉
+
+- 路由模式：`createWebHistory()`（HTML5 history，需服务器所有路径回退到 index.html）/ `createWebHashHistory()`（基于 location.hash，无需服务端配置）。
+- 动态路由：`path: '/user/:id'`，`useRoute().params.id` 取；Vue3 用组合式 `useRoute`/`useRouter`。
+- 导航守卫顺序（常考）：全局 `beforeEach` → 路由独享 `beforeEnter` → 组件内 `beforeRouteEnter`/`Update`/`Leave` → 全局 `beforeResolve` → 全局 `afterEach`。权限拦截多在 `beforeEach` 做。
+- 路由懒加载：`component: () => import('./views/xxx.vue')`，配合 Vite 自动分包。
+
+### 🔁 对比学习（Router 3 vs 4）
+
+- 创建：`new VueRouter({...})` → `createRouter({...})`。
+- 模式：`mode: 'history'` → `history: createWebHistory()`。
+- 捕获所有：`{ path: '*' }` → `{ path: '/:pathMatch(.*)*' }`。
+- 组件内 `beforeRouteEnter` 不能直接访问 `this`，Vue2 靠 `next(vm => {})` 拿实例；Vue3 用 `onBeforeRouteEnter` 等组合式守卫更顺。
+
+```js
+// 全局前置守卫做权限
+const router = createRouter({ history: createWebHistory(), routes })
+router.beforeEach((to) => {
+  if (to.meta.requiresAuth && !isLogin()) return '/login'
+})
+```
+
+### 💥 我踩过的坑
+
+- history 模式部署到 Nginx 子目录，刷新 404。最后在 Nginx 加 `try_files $uri $uri/ /index.html;` 解决——部署必踩的坑。
+- 动态路由参数变化（`/user/1` → `/user/2`）组件不重建，数据没刷新。Vue2 用 `watch $route`，Vue3 用 `beforeRouteUpdate` 或 `watch(() => route.params.id)`。
+
+### 🎯 面试官可能追问
+
+- history 和 hash 模式本质区别？history 刷新 404 怎么解决？（服务端 fallback 到 index.html）
+- 导航守卫的执行顺序？
+- 动态路由参数变了组件不更新怎么办？
+- 路由懒加载的原理？（动态 import 分包，按需加载）
+
+---
+
+### Pinia vs Vuex（⭐️⭐️）
+
+**一句话结论：** 新项目直接用 Pinia。它去掉了 Vuex 的 mutation、module 嵌套和 `this.$store` 的魔法，用 `defineStore` 一个函数搞定，Setup Store 写法跟 `ref`/`reactive` 一模一样，心智成本最低。
+
+### 🍳 生活类比
+
+Vuex 像老式货栈：改库存得先写条子给"账房先生"（mutation），账房再入账，流程长。Pinia 像自助仓储——你直接拿、直接放，管理员就是你自己，链路短了一大截。
+
+### 🔍 原理下沉
+
+- Vuex 有 state/getters/mutations/actions 四件套，mutation 必须同步、action 可异步；模块要 `namespaced`。
+- Pinia：只有 state/getters/actions，没有 mutation；action 里既能同步也能异步。
+- Setup Store：`const useX = defineStore('x', () => { const count = ref(0); const inc = () => count.value++; return { count, inc } })`——和写组件逻辑一样。
+- Option Store 写法类似 Vuex：`defineStore('x', { state, getters, actions })`。
+
+### 🔁 对比学习
+
+```js
+// Vuex：mutation 必须同步
+const store = new Vuex.Store({
+  state: { count: 0 },
+  mutations: { inc(s) { s.count++ } },
+  actions: { incAsync({ commit }) { setTimeout(() => commit('inc'), 1000) } }
+})
+```
+```js
+// Pinia Setup Store：写法贴近 ref/reactive
+const useCounter = defineStore('counter', () => {
+  const count = ref(0)
+  const inc = () => count.value++
+  const incAsync = () => setTimeout(inc, 1000)
+  return { count, inc, incAsync }
+})
+```
+
+### 💥 我踩过的坑
+
+- Vuex 里曾在 mutation 写异步（调接口），调试时 action 日志和 state 变更对不上，崩溃。Vuex 规矩是"异步只在 action"，踩过才记住。
+- Pinia 刚开始不习惯"没有 mutation"，后来发现反而清爽——改状态就是调 action 或直接 `store.count++`（devtools 照样追踪），负担小很多。
+
+### 🎯 面试官可能追问
+
+- Pinia 为什么去掉 mutation？（Vuex 的 mutation 是为 devtools 时间旅行强加的概念，实际多为负担；Pinia 用 patch 仍支持追踪）
+- Pinia 怎么拆模块？（每个 store 一个 `defineStore`，天然独立，不用嵌套 namespace）
+- 两者 TS 支持差别？（Pinia 基于 TS 设计，类型推导远好于 Vuex）
+
+---
+
+### 生命周期对照、v-model 实现、diff 思路（⭐️）
+
+**一句话结论：** Vue2 和 Vue3 生命周期大体对应，Vue3 组合式里 `destroyed` 改名 `onUnmounted`；`v-model` 本质是 prop + 事件（编译期语法糖）；diff 上 Vue2 双端比较、Vue3 引入 patchFlag 做静态标记优化。
+
+### 🍳 生活类比
+
+生命周期像餐厅营业流程——开门迎客（created/mounted）、营业中（updated）、打烊（unmounted）。Vue3 把"打烊"改叫 `onUnmounted`，意思没变，只是换了挂牌。
+
+### 🔍 原理下沉（精简）
+
+- 生命周期对照：Vue2 `beforeCreate/created/mounted/updated/destroyed` ↔ Vue3 选项式同名、`<script setup>` 用 `onBeforeMount/onMounted/onBeforeUpdate/onUpdated/onUnmounted`。`destroyed` 在 Vue3 改名 `unmounted`（语义更准：组件是被"卸载"而非"销毁"）。
+- v-model 实现：见 07 章受控组件一节。Vue3 子组件用 `defineModel()` 即可，编译为 `modelValue` prop + `onUpdate:modelValue` 事件；多个 `v-model:xxx` 各自对应一个 prop + update 事件。
+- diff：Vue2 用「双端 diff」（头尾四个指针向中间夹）；Vue3 编译阶段给动态节点打 `patchFlag`（如 `TEXT`、`CLASS`），diff 时只比对打了标记的部分，静态节点直接跳过，性能更好；同时用「最长递增子序列」优化节点移动。
+
+### 🔁 对比学习
+
+- Vue2：`this.$destroy()` 销毁实例；Vue3：`app.unmount()` 卸载应用。
+- Vue3 编译期优化（patchFlag + 静态提升 hoistStatic）是 Vue2 没有的，也是 Vue3 渲染更快的主因之一。
+- `v-model` 与 `.sync`：Vue2 有 `.sync` 做单向"更新 prop"，Vue3 用 `v-model:xxx` 统一取代 `.sync`。
+
+### 💥 我踩过的坑
+
+- 在 `created` 里操作 DOM 报错——那时还没挂载，`mounted` 才是能安全碰 DOM 的钩子。基础但真踩过。
+- Vue3 里忘了 `onUnmounted` 清定时器/事件监听，组件切走后定时器还在跑，内存泄漏。现在习惯 `onMounted` 注册、配对 `onUnmounted` 清理。
+
+### 🎯 面试官可能追问
+
+- Vue3 为什么把 `destroyed` 改成 `unmounted`？（更准确：组件是被"卸载"而非"销毁"）
+- Vue3 的 patchFlag 解决了什么？（跳过静态节点比对，减少无效 diff）
+- `v-model` 和 `.sync` 的关系？（Vue3 用 `v-model:xxx` 取代 `.sync`）
