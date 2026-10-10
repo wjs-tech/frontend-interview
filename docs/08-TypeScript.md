@@ -7,7 +7,7 @@
 - [x] interface vs type：何时用哪个（含声明合并、AI 过度可选坑）
 - [x] Utility Types（Partial/Pick/Omit/Record…）实战 + 真实踩坑
 - [ ] 基础类型与类型推断（更细展开，可后续）
-- [ ] 类型收窄专题（typeof / in / 判别联合，可后续补）
+- [x] 类型收窄专题（typeof / in / 判别联合 / 类型谓词 / 断言函数 / 穷尽检查，2026-10-10 补）
 
 ---
 
@@ -92,3 +92,48 @@ type PublicUser = Omit<User, 'password'>
 ---
 
 泛型解决"一份逻辑通吃多种类型"，interface/type 解决"怎么把形状说清楚"，Utility Types 解决"在已有类型上做加减"。三个合起来，TS 才从"注释"变成真护城河。
+
+---
+
+## 4. 类型收窄：把"可能是 A 也可能是 B"逼成"确定是 A"（⭐️）
+
+**一句话结论**：TS 没法在运行时看你的值，但它看得懂你写的 `if` 判断——你在分支里用 `typeof` / `in` / `instanceof` / 字面量相等这些"收窄守卫"一筛，编译器就把那个宽泛的联合类型，缩成具体能用的那一个。收窄不是新语法，是编译器顺着你的条件判断"顺藤摸瓜"。
+
+🍳 **生活类比：快递分拣线**
+传送带上混装着书、杯子、玩偶（一个 `union` 类型）。你不能对"任意包裹"直接调用"翻书页"——万一是杯子就傻了。扫码枪扫一下：看到"有书页"就归到书道（收窄成 `Book`），看到"能装水"归到杯子道。只有进了书道的包裹，后面才能走"盖章 / 贴条码"这些书专用流程。TS 的收窄就是那把扫码枪：你写 `if ('pages' in item)`，它就知道这个分支里 `item` 一定是带 `pages` 的那个变体。
+
+🔍 **原理下沉：收窄守卫全家福**
+- **`typeof`（管原始类型）**：最便宜的守卫。`typeof x === 'string'` 收窄成 string。⚠️ 经典坑：`typeof null === 'object'`，所以排除 null 要单独 `x === null` 或 `x != null`，不能指望 typeof。
+- **`instanceof`（管类实例）**：`err instanceof Error` 收窄成 Error 实例。注意它认原型链，跨 iframe / vm 上下文会失灵，普通对象字面量也认不出——这种情形换判别联合。
+- **`in`（管"有没有这个属性"）**：两个对象形状不同、但没公共判别字段时，`'swim' in animal` 就收窄。坑：它在原型链上也返回 true，可选属性会让两个分支都还留着这个类型。
+- **判别联合（discriminated union，最值钱）**：给每个变体加一个字面量字段（`type` / `kind` / `status`），`switch` 一判就精准收窄：
+```ts
+type Shape =
+  | { kind: 'circle'; radius: number }
+  | { kind: 'rect'; width: number; height: number }
+function area(s: Shape): number {
+  switch (s.kind) {
+    case 'circle': return Math.PI * s.radius ** 2   // 这里 s 是 circle
+    case 'rect':   return s.width * s.height          // 这里 s 是 rect
+  }
+}
+```
+- **穷尽检查（assertNever）**：switch 末尾 `default: { const _exhaustive: never = s; throw ... }`。哪天你给 `Shape` 加个 `triangle` 忘了处理，这一行直接编译报错——把"漏处理"从运行时 bug 提前成编译期报错。
+- **类型谓词（`value is T`）**：内置守卫表达不了时，自己包一个可复用的。`function isBook(x: unknown): x is Book { return ... }`，之后 `if (isBook(v))` 里面 v 就是 Book。⚠️ 编译器**无条件信任**谓词，你 body 撒谎就埋运行时雷——所以外部数据（HTTP / 接口）别用谓词兜底，要用 schema 解析（zod 之类）。
+- **断言函数（`asserts value is T`）**：和谓词不同，它失败就抛错、成功才收窄。`function assertDefined(v): asserts v is T { if (v == null) throw }`，调用之后下面代码里 v 就是确定的，不用再判空。配合 `noUncheckedIndexedAccess` 特别香。
+
+🔁 **对比学习（一个常见误区）**
+很多人以为 `obj?.prop` 能收窄类型——其实**可选链不收窄**。它只是"有就取、没有就 undefined"，TS 不会因此把 `obj` 变成"一定有 prop 的那个分支"。要收窄还是得用 `in` 或类型谓词。另一组对比：`typeof` 只能区分七种原始结果，遇到 `object` 就到头了，所以"到底是哪种对象"它分不了，得上 `in` / 判别联合 / 谓词。
+
+💥 **我踩过的坑**
+1. 判别联合的判别字段写成 `string` 而非字面量联合：`type: string` 不会触发收窄，必须 `type: 'circle' | 'rect'`。我第一次写漏了字面量，switch 里拿不到精确类型，还以为 TS 抽风。
+2. `typeof null` 的坑：有次我 `if (typeof data === 'object')` 想判断"是个对象"，结果 `null` 也混进来了，后续 `.map` 直接炸。现在一律 `data != null && typeof data === 'object'`。
+3. 滥用类型谓词盖真实校验：让 AI 帮我对接口返回写 `isUser()`，它 body 只检查"有 id 字段"就返回 true，结果后端偶发返回 `{ id: null }` 也被当 User，业务里 `user.name` 全是 undefined。现在对外数据我宁可上 zod 解析，不让谓词背这个锅。
+
+🎯 **面试官可能追问**
+- `typeof null` 为什么是 object？（历史包袱，JS 设计早期 bug）
+- 判别联合相比 `in` 检查好在哪？（可穷尽、可扩展、编译器帮你查漏）
+- 类型谓词和断言函数区别？（前者返回布尔、不抛错；后者失败抛错、成功才收窄）
+- 为什么 `?.` 不能收窄类型？（它就是取值语法，不构成类型守卫）
+
+> 我不确定之处：超大型联合（十几个变体）用判别字段还是 `in` 守卫，性能 / 可读性拐点在哪，我实战里 prefer 判别联合，但具体阈值没 Benchmark 过，上面是工程直觉。
